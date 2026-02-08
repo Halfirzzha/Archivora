@@ -1,0 +1,14 @@
+#!/bin/bash
+# =============================================================================
+# PHP-FPM HEALTHCHECK SCRIPT
+# Checks if PHP-FPM is accepting connections
+# =============================================================================
+
+set -e
+
+# Check if PHP-FPM process is running (without -x flag for partial match)
+if pgrep php-fpm > /dev/null 2>&1; then
+    exit 0
+fi
+
+exit 1

@@ -1,0 +1,374 @@
+# =============================================================================
+# PRODUCTION-READY DOCKER COMPOSE - Laravel Filament + PostgreSQL + Redis
+# Status: Ephemeral containers + Managed volumes + Healthchecks + Restart policies
+# Security: Internal network, non-root user, env_file, minimal ports exposed
+# Performance: Redis cache/queue, optimized PHP-FPM, Nginx
+# =============================================================================
+
+# =============================================================================
+# SERVICES
+# =============================================================================
+services:
+  # ---------------------------------------------------------------------------
+  # PHP-FPM Application Service (Stateless Container)
+  # ---------------------------------------------------------------------------
+  app:
+    build:
+      context: ..
+      dockerfile: docker/php/Dockerfile
+      target: production
+      args:
+        WWWGROUP: "${WWWGROUP:-1000}"
+        WWWUSER: "${WWWUSER:-1000}"
+        # Install dev dependencies (Pail, Pint, PHPUnit) in local/dev mode
+        INSTALL_DEV_DEPS: "${INSTALL_DEV_DEPS:-false}"
+    image: archivora-app:latest
+    container_name: archivora_app
+    restart: unless-stopped
+    working_dir: /var/www/html
+    env_file:
+      - ../.env
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      APP_DEBUG: ${APP_DEBUG:-false}
+      CACHE_DRIVER: redis
+      SESSION_DRIVER: redis
+      QUEUE_CONNECTION: redis
+      LOG_CHANNEL: stderr
+      DB_HOST: postgres
+      REDIS_HOST: redis
+      MINIO_ENDPOINT: http://minio:9000
+      MEILISEARCH_HOST: http://meilisearch:7700
+      RUN_MIGRATIONS: "true"
+      CACHE_CONFIGS: "true"
+    volumes:
+      # Application code (ephemeral - read container's copy, not bind mount)
+      # Persistent storage (managed volume)
+      - storage-data:/var/www/html/storage
+      - bootstrap-cache:/var/www/html/bootstrap/cache
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "php-fpm-healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    profiles:
+      - production
+      - dev
+
+  # ---------------------------------------------------------------------------
+  # Nginx Web Server (Reverse Proxy for PHP-FPM)
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: archivora_nginx
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-80}:80"
+    volumes:
+      # Nginx config
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # Application public (read-only)
+      - ../public:/var/www/html/public:ro
+      # Shared storage with app container
+      - storage-data:/var/www/html/storage:ro
+    networks:
+      - internal
+      - external
+    depends_on:
+      - app
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost/health",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - production
+      - dev
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL Database (Persistent Volume)
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:18-alpine
+    container_name: archivora_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "${DB_DATABASE:-archivora}"
+      POSTGRES_USER: "${DB_USERNAME:-archivora}"
+      POSTGRES_PASSWORD: "${DB_PASSWORD:-secret}"
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "${FORWARD_DB_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - internal
+      - external
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${DB_USERNAME:-archivora} -d ${DB_DATABASE:-archivora}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    profiles:
+      - production
+      - dev
+
+  # ---------------------------------------------------------------------------
+  # Redis Cache + Session + Queue (Persistent Volume)
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: archivora_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - production
+      - dev
+
+  # ---------------------------------------------------------------------------
+  # Queue Worker (Laravel Queue Processing - Redis Driver)
+  # ---------------------------------------------------------------------------
+  queue:
+    build:
+      context: ..
+      dockerfile: docker/php/Dockerfile
+      target: production
+    image: archivora-app:latest
+    container_name: archivora_queue
+    restart: unless-stopped
+    working_dir: /var/www/html
+    env_file:
+      - ../.env
+    environment:
+      APP_ENV: production
+      APP_DEBUG: "false"
+      CACHE_DRIVER: redis
+      SESSION_DRIVER: redis
+      QUEUE_CONNECTION: redis
+      LOG_CHANNEL: stderr
+      DB_HOST: postgres
+      REDIS_HOST: redis
+    volumes:
+      - ../:/var/www/html:ro
+      - storage-data:/var/www/html/storage
+      - bootstrap-cache:/var/www/html/bootstrap/cache
+    networks:
+      - internal
+    depends_on:
+      app:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: php artisan queue:work redis --sleep=3 --tries=3 --max-time=3600 --timeout=60 --verbose
+    profiles:
+      - production
+      - dev
+
+  # ---------------------------------------------------------------------------
+  # Scheduler (Laravel Task Scheduler via Supervisor)
+  # ---------------------------------------------------------------------------
+  scheduler:
+    build:
+      context: ..
+      dockerfile: docker/php/Dockerfile
+      target: production
+    image: archivora-app:latest
+    container_name: archivora_scheduler
+    restart: unless-stopped
+    working_dir: /var/www/html
+    env_file:
+      - ../.env
+    environment:
+      APP_ENV: production
+      APP_DEBUG: "false"
+      CACHE_DRIVER: redis
+      SESSION_DRIVER: redis
+      QUEUE_CONNECTION: redis
+      LOG_CHANNEL: stderr
+      DB_HOST: postgres
+      REDIS_HOST: redis
+    volumes:
+      - ../:/var/www/html:ro
+      - storage-data:/var/www/html/storage
+      - bootstrap-cache:/var/www/html/bootstrap/cache
+    networks:
+      - internal
+    depends_on:
+      app:
+        condition: service_healthy
+    command: /bin/sh -c "while true; do php artisan schedule:run --verbose --no-interaction && sleep 60; done"
+    profiles:
+      - production
+
+  # ---------------------------------------------------------------------------
+  # Mailpit (Development Email Testing - Dev Profile Only)
+  # ---------------------------------------------------------------------------
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: archivora_mailpit
+    restart: unless-stopped
+    ports:
+      - "${FORWARD_MAILPIT_PORT:-1025}:1025"
+      - "${FORWARD_MAILPIT_DASHBOARD_PORT:-8025}:8025"
+    networks:
+      - internal
+      - external
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--quiet",
+          "--tries=1",
+          "--spider",
+          "http://localhost:8025",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    profiles:
+      - dev
+
+  # ---------------------------------------------------------------------------
+  # MinIO (S3-Compatible Object Storage - Dev Profile Only)
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    container_name: archivora_minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${AWS_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${AWS_SECRET_ACCESS_KEY:-minioadmin123}
+    ports:
+      - "${FORWARD_MINIO_PORT:-9000}:9000"
+      - "${FORWARD_MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    networks:
+      - internal
+      - external
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - dev
+
+  # ---------------------------------------------------------------------------
+  # Meilisearch (Full-Text Search Engine - Dev Profile Only)
+  # ---------------------------------------------------------------------------
+  meilisearch:
+    image: getmeili/meilisearch:latest
+    container_name: archivora_meilisearch
+    restart: unless-stopped
+    environment:
+      MEILI_ENV: development
+      MEILI_NO_ANALYTICS: true
+    ports:
+      - "${FORWARD_MEILISEARCH_PORT:-7700}:7700"
+    volumes:
+      - meilisearch-data:/meili_data
+    networks:
+      - internal
+      - external
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--quiet",
+          "--tries=1",
+          "--spider",
+          "http://localhost:7700/health",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - dev
+
+  # ---------------------------------------------------------------------------
+  # Adminer (Database Management UI - Dev Profile Only)
+  # ---------------------------------------------------------------------------
+  adminer:
+    image: adminer:latest
+    container_name: archivora_adminer
+    restart: unless-stopped
+    ports:
+      - "${FORWARD_ADMINER_PORT:-8080}:8080"
+    networks:
+      - internal
+      - external
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+      ADMINER_DESIGN: nette
+    profiles:
+      - dev
+
+# =============================================================================
+# NETWORKS
+# =============================================================================
+networks:
+  # Internal network (no external access - secure)
+  internal:
+    driver: bridge
+    internal: true
+  # External network (public access - only nginx)
+  external:
+    driver: bridge
+
+# =============================================================================
+# VOLUMES (Managed Persistent Storage)
+# =============================================================================
+volumes:
+  # Database persistent storage
+  postgres-data:
+    driver: local
+  # Redis persistent storage
+  redis-data:
+    driver: local
+  # Application storage (uploads, logs, etc.)
+  storage-data:
+    driver: local
+  # Bootstrap cache (optimized autoloading)
+  bootstrap-cache:
+    driver: local
+  # MinIO data (object storage)
+  minio-data:
+    driver: local
+  # Meilisearch data (search index)
+  meilisearch-data:
+    driver: local

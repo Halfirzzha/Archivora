@@ -1,0 +1,96 @@
+# =============================================================================
+# DOCKER BUILD CONTEXT EXCLUSIONS
+# Reduces build context size and build time (exclude unnecessary files)
+# =============================================================================
+
+# Version Control
+.git/
+.gitignore
+.gitattributes
+
+# IDE & Editor Files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Documentation (not needed in production image)
+*.md
+!README.md
+docs/
+
+# Environment Files (secrets should not be in image)
+.env
+.env.*
+!.env.example
+!.env.production.example
+
+# Node & Frontend Build
+node_modules/
+npm-debug.log
+yarn-error.log
+.npm/
+.yarn/
+public/hot
+public/build/
+public/storage
+
+# PHP Dependencies (vendor will be installed during build, but keep composer.lock for production!)
+vendor/
+# composer.lock  ← MUST be included for production builds (deterministic dependencies)
+
+# Laravel Specific
+storage/app/*
+!storage/app/.gitignore
+!storage/app/public/
+storage/framework/cache/*
+!storage/framework/cache/.gitignore
+storage/framework/sessions/*
+!storage/framework/sessions/.gitignore
+storage/framework/testing/*
+!storage/framework/testing/.gitignore
+storage/framework/views/*
+!storage/framework/views/.gitignore
+storage/logs/*
+!storage/logs/.gitignore
+bootstrap/cache/*
+!bootstrap/cache/.gitignore
+
+# Testing
+tests/
+phpunit.xml
+.phpunit.result.cache
+coverage/
+
+# Docker Files (not needed inside container)
+compose.yaml
+docker-compose*.yaml
+docker-compose*.yml
+Dockerfile
+.dockerignore
+
+# Build Artifacts
+*.log
+*.cache
+.sass-cache/
+
+# Temporary Files
+tmp/
+temp/
+*.tmp
+
+# Database Files
+*.sql
+*.sqlite
+*.sqlite-journal
+
+# Backups
+*.backup
+*.bak
+backup-*
+
+# OS-specific
+Thumbs.db
+.Trashes
